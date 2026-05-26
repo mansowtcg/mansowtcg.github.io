@@ -2110,8 +2110,24 @@ function scorePrediction(prediction, results = RESULTS) {
 
 // ---- Leaderboard ----
 
+function getLeaderboardCsvUrl() {
+  // Accept whatever URL the user pasted (edit, view, share or already-CSV) and
+  // turn it into a CSV endpoint that fetch() can actually read from the browser.
+  const url = (LEADERBOARD_CSV_URL || '').trim();
+  if (!url) return '';
+  if (/output=csv|tqx=out:csv|format=csv/i.test(url)) return url;
+  const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (!match) return url;
+  return `https://docs.google.com/spreadsheets/d/${match[1]}/gviz/tq?tqx=out:csv`;
+}
+
 async function loadLeaderboard() {
-  const res = await fetch(LEADERBOARD_CSV_URL);
+  const csvUrl = getLeaderboardCsvUrl();
+  if (!csvUrl) {
+    renderLeaderboardList([]);
+    return;
+  }
+  const res = await fetch(csvUrl);
   const csv = await res.text();
 
   const rows = parseCSV(csv);
@@ -2458,7 +2474,7 @@ function renderReviewGroups(prediction, entry) {
     const totalBadge = document.createElement('span');
     totalBadge.className = 'review-group-total-points' + (groupTotalPoints > 0 ? ' got-points' : ' no-points');
     totalBadge.title = 'Total de puntos conseguidos en el grupo ' + g;
-    totalBadge.textContent = `+${groupTotalPoints}pt`; + (groupTotalPoints === 1 ? '' : 's');
+    totalBadge.textContent = `+${groupTotalPoints}pt`;
     header.appendChild(totalBadge);
 
     card.appendChild(header);
