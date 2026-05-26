@@ -3487,6 +3487,7 @@ async function init() {
   });
 
   document.getElementById('btnReset').addEventListener('click', () => {
+    if (!confirm('¿Seguro que quieres borrar TODAS tus predicciones? No se puede deshacer.')) return;
     resetState();
     computeMatchTeams();
     renderAll();
