@@ -613,12 +613,126 @@ async function loadData() {
     };
     BRACKET_R32 = KO_TREE.round32;
     LOADED = true;
+    // Sustituye los resultados de prueba por los reales en cuanto haya alguno en
+    // openfootball/worldcup.json. Mientras no haya partidos con score, deja el
+    // results.js de prueba intacto.
+    applyAutoResultsFromOpenFootball(data.matches);
     return true;
   } catch(e) {
     console.error('Failed to load tournament data:', e);
     showToast('Failed to load tournament data. Check your connection.', true);
     return false;
   }
+}
+
+const OPENFOOTBALL_ROUND_MAP = {
+  'Round of 32': 'round32',
+  'Round of 16': 'round16',
+  'Quarter-finals': 'quarterfinals',
+  'Quarterfinals': 'quarterfinals',
+  'Semi-finals': 'semifinals',
+  'Semifinals': 'semifinals',
+  'Match for third place': 'thirdPlace',
+  'Play-off for third place': 'thirdPlace',
+  'Third place play-off': 'thirdPlace',
+  'Final': 'final'
+};
+
+function isPlaceholderTeamName(team) {
+  // openfootball usa placeholders tipo "1A", "2B", "W74", "L101" hasta que sale
+  // el equipo real. No queremos tratarlos como equipos en los resultados.
+  return !team || /^[WL]?\d+[A-L]?$/.test(team);
+}
+
+function getOpenFootballScore(match) {
+  const home = typeof match.score1 === 'number' ? match.score1 : null;
+  const away = typeof match.score2 === 'number' ? match.score2 : null;
+  return { home, away };
+}
+
+function getOpenFootballWinner(match) {
+  if (typeof match.score1pen === 'number' && typeof match.score2pen === 'number') {
+    if (match.score1pen === match.score2pen) return null;
+    return match.score1pen > match.score2pen ? match.team1 : match.team2;
+  }
+  if (typeof match.score1et === 'number' && typeof match.score2et === 'number') {
+    if (match.score1et === match.score2et) return null;
+    return match.score1et > match.score2et ? match.team1 : match.team2;
+  }
+  if (typeof match.score1 === 'number' && typeof match.score2 === 'number') {
+    if (match.score1 === match.score2) return null;
+    return match.score1 > match.score2 ? match.team1 : match.team2;
+  }
+  return null;
+}
+
+function applyAutoResultsFromOpenFootball(matches) {
+  if (!Array.isArray(matches) || !GROUP_NAMES.length) return;
+
+  const autoGroupMatches = {};
+  const autoKnockoutMatches = { round32: [], round16: [], quarterfinals: [], semifinals: [], thirdPlace: [], final: [] };
+  let anyScoreSeen = false;
+
+  matches.forEach(m => {
+    if (m.group && m.group.startsWith('Group ')) {
+      const { home, away } = getOpenFootballScore(m);
+      if (home === null || away === null) return;
+      if (isPlaceholderTeamName(m.team1) || isPlaceholderTeamName(m.team2)) return;
+      const letter = m.group.replace('Group ', '');
+      if (!autoGroupMatches[letter]) autoGroupMatches[letter] = {};
+      autoGroupMatches[letter][groupMatchKey(m.team1, m.team2)] = { home, away };
+      anyScoreSeen = true;
+      return;
+    }
+
+    const round = OPENFOOTBALL_ROUND_MAP[m.round];
+    if (!round) return;
+    if (typeof m.num !== 'number') return;
+    if (isPlaceholderTeamName(m.team1) || isPlaceholderTeamName(m.team2)) return;
+
+    const winner = getOpenFootballWinner(m);
+    if (!winner) return;
+
+    autoKnockoutMatches[round].push({
+      match: m.num,
+      team1: m.team1,
+      team2: m.team2,
+      winner
+    });
+    anyScoreSeen = true;
+  });
+
+  if (!anyScoreSeen) return;
+
+  // Calcula la clasificación final de grupos desde los resultados auto-cargados,
+  // reutilizando el mismo algoritmo (puntos, dif. de goles, head-to-head, etc.)
+  // que usa la fase de predicción.
+  const oldStateGroupMatches = state.groupMatches;
+  state.groupMatches = normalizeGroupMatchesForStandings(autoGroupMatches);
+
+  const autoGroups = {};
+  GROUP_NAMES.forEach(group => {
+    autoGroups[group] = calculateGroupStandings(group).map(row => row.team);
+  });
+
+  const allGroupsComplete = GROUP_NAMES.every(group => isGroupComplete(group));
+  const autoThirdPlace = allGroupsComplete
+    ? getAutoThirdPlaceTeams().map(item => item.row.team)
+    : [];
+
+  state.groupMatches = oldStateGroupMatches;
+
+  // Preserva los premios manuales (Bota/Balón de Oro) — esos los anuncia FIFA y
+  // no salen en el JSON de partidos.
+  const preservedAwards = RESULTS.awards || { goldenBoot: ['', '', ''], goldenBall: ['', '', ''] };
+
+  RESULTS.groups = autoGroups;
+  RESULTS.thirdPlace = autoThirdPlace;
+  RESULTS.groupMatches = autoGroupMatches;
+  RESULTS.knockout = { matches: autoKnockoutMatches };
+  RESULTS.awards = preservedAwards;
+
+  console.info('[auto-results] Sustituidos los resultados de prueba con los reales de openfootball/worldcup.json');
 }
 
 function findTeamGroup(teamName) {
