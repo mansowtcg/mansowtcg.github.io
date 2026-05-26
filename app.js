@@ -3285,6 +3285,11 @@ async function confirmSubmitPrediction() {
 
   const params = new URLSearchParams();
   params.append(ENTRY_ID, JSON.stringify(payload));
+  // Google Forms exige estos campos ocultos para que el submit se acepte de verdad.
+  // Sin ellos el POST devuelve 200 pero la respuesta se descarta y la hoja queda en blanco.
+  params.append('fvv', '1');
+  params.append('pageHistory', '0');
+  params.append('submissionTimestamp', '-1');
 
   closeNameModal();
   showLoading('Publicando...');
