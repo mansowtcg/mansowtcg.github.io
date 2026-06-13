@@ -628,8 +628,10 @@ async function loadData() {
 const OPENFOOTBALL_ROUND_MAP = {
   'Round of 32': 'round32',
   'Round of 16': 'round16',
+  'Quarter-final': 'quarterfinals',
   'Quarter-finals': 'quarterfinals',
   'Quarterfinals': 'quarterfinals',
+  'Semi-final': 'semifinals',
   'Semi-finals': 'semifinals',
   'Semifinals': 'semifinals',
   'Match for third place': 'thirdPlace',
@@ -644,13 +646,40 @@ function isPlaceholderTeamName(team) {
   return !team || /^[WL]?\d+[A-L]?$/.test(team);
 }
 
+function scorePair(value) {
+  // openfootball guarda los marcadores como pares [casa, fuera].
+  if (Array.isArray(value) && value.length === 2 &&
+      typeof value[0] === 'number' && typeof value[1] === 'number') {
+    return value;
+  }
+  return null;
+}
+
 function getOpenFootballScore(match) {
+  // Formato actual de openfootball: match.score = { ft:[c,f], ht:[c,f], et:[..], p:[..] }.
+  const s = match.score;
+  if (s && typeof s === 'object') {
+    const ft = scorePair(s.ft);
+    if (ft) return { home: ft[0], away: ft[1] };
+  }
+  // Fallback al formato plano antiguo (score1/score2) por si vuelve a cambiar.
   const home = typeof match.score1 === 'number' ? match.score1 : null;
   const away = typeof match.score2 === 'number' ? match.score2 : null;
   return { home, away };
 }
 
 function getOpenFootballWinner(match) {
+  const s = (match.score && typeof match.score === 'object') ? match.score : null;
+  if (s) {
+    // El ganador se decide por penaltis > prórroga > tiempo reglamentario.
+    const p = scorePair(s.p);
+    if (p) return p[0] === p[1] ? null : (p[0] > p[1] ? match.team1 : match.team2);
+    const et = scorePair(s.et);
+    if (et) return et[0] === et[1] ? null : (et[0] > et[1] ? match.team1 : match.team2);
+    const ft = scorePair(s.ft);
+    if (ft) return ft[0] === ft[1] ? null : (ft[0] > ft[1] ? match.team1 : match.team2);
+  }
+  // Fallback al formato plano antiguo.
   if (typeof match.score1pen === 'number' && typeof match.score2pen === 'number') {
     if (match.score1pen === match.score2pen) return null;
     return match.score1pen > match.score2pen ? match.team1 : match.team2;
