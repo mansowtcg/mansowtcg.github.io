@@ -2161,13 +2161,34 @@ function getKnockoutProgressPointsForTeam(team, roundName, realStageTeams, predi
   return points;
 }
 
+function isRealGroupComplete(group, results = RESULTS) {
+  const real = results.groupMatches?.[group] || {};
+  return getGroupMatchList(group).every(match => {
+    const r = getMatchResultFromMap(real, match);
+    return parseGoalValue(r.home) !== null && parseGoalValue(r.away) !== null;
+  });
+}
+
+// La fase de grupos solo cuenta como terminada cuando TODOS los grupos tienen
+// todos sus partidos jugados. Hasta entonces la clasificación es provisional, así
+// que los puntos por posición de grupo y por clasificar a eliminatorias (pasar de
+// fase) NO se conceden todavía.
+function areAllRealGroupsComplete(results = RESULTS) {
+  return GROUP_NAMES.length > 0 && GROUP_NAMES.every(group => isRealGroupComplete(group, results));
+}
+
 function getKnockoutScoreBreakdown(prediction, results = RESULTS) {
   const predStages = getKnockoutStageTeamSets(prediction);
   const realStages = getKnockoutStageTeamSets(results);
+  const groupsDone = areAllRealGroupsComplete(results);
 
   let score = 0;
 
   ['round32', 'round16', 'quarterfinals', 'semifinals', 'finalist'].forEach(stage => {
+    // Clasificar a dieciseisavos (round32) es "pasar la fase de grupos": no puntúa
+    // hasta que toda la fase de grupos haya acabado. Las rondas siguientes ya están
+    // gateadas de forma natural porque solo se rellenan con partidos KO ya jugados.
+    if (stage === 'round32' && !groupsDone) return;
     const points = KNOCKOUT_SCORING[stage] || 0;
     predStages[stage].forEach(team => {
       if (realStages[stage].has(team)) score += points;
@@ -2205,13 +2226,21 @@ function getSemifinalistsFromPayload(payload) {
 function scorePrediction(prediction, results = RESULTS) {
   let score = 0;
 
+  // Los puntos por la posición final de grupo (1º/2º/3º) son "puntos de pasar la
+  // fase de grupos": solo se conceden cuando TODA la fase de grupos ha terminado,
+  // porque hasta entonces la clasificación es provisional. Los puntos por acertar
+  // marcadores sí cuentan partido a partido (más abajo).
+  const groupsDone = areAllRealGroupsComplete(results);
+
   GROUP_NAMES.forEach(group => {
     const predGroup = prediction.groups?.[group] || [];
     const realGroup = results.groups?.[group] || [];
 
-    if (predictionResultStatus(predGroup[0], realGroup[0]) === 'correct') score += puntuaciones.grupos.posicion.primero;
-    if (predictionResultStatus(predGroup[1], realGroup[1]) === 'correct') score += puntuaciones.grupos.posicion.segundo;
-    if (predictionResultStatus(predGroup[2], realGroup[2]) === 'correct') score += puntuaciones.grupos.posicion.tercero;
+    if (groupsDone) {
+      if (predictionResultStatus(predGroup[0], realGroup[0]) === 'correct') score += puntuaciones.grupos.posicion.primero;
+      if (predictionResultStatus(predGroup[1], realGroup[1]) === 'correct') score += puntuaciones.grupos.posicion.segundo;
+      if (predictionResultStatus(predGroup[2], realGroup[2]) === 'correct') score += puntuaciones.grupos.posicion.tercero;
+    }
 
     const predMatches = prediction.groupMatches?.[group] || {};
     const realMatches = results.groupMatches?.[group] || {};
@@ -2533,6 +2562,9 @@ function getPredictedGroupPositionPoints(team, idx, autoThirds, realOrder, realT
   // Group-stage position points are ONLY for exact positions.
   // No extra points for correctly predicting a best third: that is counted
   // later in the knockout bracket when the team appears in round of 32.
+  // Tampoco se conceden hasta que toda la fase de grupos haya terminado, igual
+  // que en el ranking (scorePrediction): la clasificación es provisional antes.
+  if (!areAllRealGroupsComplete()) return 0;
   if (predictionResultStatus(team, realOrder[idx]) !== 'correct') return 0;
 
   if (idx === 0) return puntuaciones.grupos.posicion.primero;
@@ -3503,11 +3535,7 @@ function formatRelativeTime(date) {
 }
 
 function isResultsGroupComplete(group) {
-  const real = RESULTS.groupMatches?.[group] || {};
-  return getGroupMatchList(group).every(match => {
-    const r = getMatchResultFromMap(real, match);
-    return parseGoalValue(r.home) !== null && parseGoalValue(r.away) !== null;
-  });
+  return isRealGroupComplete(group);
 }
 
 function countPlayedGroupMatches() {
