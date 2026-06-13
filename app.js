@@ -722,11 +722,14 @@ function applyAutoResultsFromOpenFootball(matches) {
     const winner = getOpenFootballWinner(m);
     if (!winner) return;
 
+    const { home, away } = getOpenFootballScore(m);
     autoKnockoutMatches[round].push({
       match: m.num,
       team1: m.team1,
       team2: m.team2,
-      winner
+      winner,
+      home,
+      away
     });
     anyScoreSeen = true;
   });
@@ -3462,7 +3465,254 @@ function renderAll() {
   renderThirdPlace();
   renderBracket();
   renderAwardSelects();
+  renderResultsView();
   loadLeaderboard();
+}
+
+/* ============================================================
+   VISTA DE RESULTADOS EN VIVO ("Soluciones")
+   Muestra solo el lado real del torneo (lo que va saliendo en
+   openfootball): marcadores por grupo + clasificación real, más
+   una lista compacta de eliminatorias jugadas. Se auto-refresca.
+   ============================================================ */
+
+const RESULTS_REFRESH_MS = 120000;        // re-pide el JSON cada 2 min
+let resultsRefreshTimer = null;
+let resultsTickerTimer = null;
+let lastResultsFetch = null;              // Date de la última carga correcta
+
+const KO_ROUND_ORDER = ['round32', 'round16', 'quarterfinals', 'semifinals', 'thirdPlace', 'final'];
+const KO_ROUND_LABELS = {
+  round32: 'Dieciseisavos',
+  round16: 'Octavos',
+  quarterfinals: 'Cuartos',
+  semifinals: 'Semifinales',
+  thirdPlace: '3.er y 4.º puesto',
+  final: 'Final'
+};
+
+function formatRelativeTime(date) {
+  if (!date) return '';
+  const secs = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+  if (secs < 10) return 'justo ahora';
+  if (secs < 60) return `hace ${secs} s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `hace ${mins} min`;
+  const hrs = Math.floor(mins / 60);
+  return `hace ${hrs} h`;
+}
+
+function isResultsGroupComplete(group) {
+  const real = RESULTS.groupMatches?.[group] || {};
+  return getGroupMatchList(group).every(match => {
+    const r = getMatchResultFromMap(real, match);
+    return parseGoalValue(r.home) !== null && parseGoalValue(r.away) !== null;
+  });
+}
+
+function countPlayedGroupMatches() {
+  let n = 0;
+  GROUP_NAMES.forEach(group => {
+    const real = RESULTS.groupMatches?.[group] || {};
+    getGroupMatchList(group).forEach(match => {
+      const r = getMatchResultFromMap(real, match);
+      if (parseGoalValue(r.home) !== null && parseGoalValue(r.away) !== null) n += 1;
+    });
+  });
+  return n;
+}
+
+function countPlayedKnockoutMatches() {
+  const ko = RESULTS.knockout?.matches || {};
+  return KO_ROUND_ORDER.reduce((sum, round) => sum + ((ko[round] || []).length), 0);
+}
+
+function renderResultsFixtureRow(match, index, group) {
+  const real = RESULTS.groupMatches?.[group] || {};
+  const r = getMatchResultFromMap(real, match);
+  const rh = parseGoalValue(r.home);
+  const ra = parseGoalValue(r.away);
+  const played = rh !== null && ra !== null;
+  return `
+    <div class="results-fixture ${played ? 'played' : 'pending'}">
+      <span class="rf-day">J${getMatchdayNumber(match, index)}</span>
+      <span class="rf-team rf-left">
+        <span class="team-flag ${getTeamFlagClass(match.team1)}"></span>
+        <span class="rf-name">${escapeHtml(match.team1)}</span>
+      </span>
+      <span class="rf-score">${played ? `${rh}-${ra}` : (formatMatchDate(match) || 'vs')}</span>
+      <span class="rf-team rf-right">
+        <span class="rf-name">${escapeHtml(match.team2)}</span>
+        <span class="team-flag ${getTeamFlagClass(match.team2)}"></span>
+      </span>
+    </div>
+  `;
+}
+
+function renderResultsGroupCard(group) {
+  const matches = getGroupMatchList(group);
+  const standings = calculateRealGroupStandingsFromResults(group);
+  const realThirds = new Set(RESULTS.thirdPlace || []);
+  const complete = isResultsGroupComplete(group);
+
+  const standingRows = standings.map((row, idx) => {
+    const topTwo = idx < 2;
+    const qualifiedThird = idx === 2 && realThirds.has(row.team);
+    const qualifies = topTwo || qualifiedThird;
+    const eliminated = complete && !qualifies;
+    return renderStandingRow({
+      team: row.team,
+      idx,
+      pts: row.pts,
+      gf: row.gf,
+      ga: row.ga,
+      statusClass: qualifies ? ' result-qualified' : '',
+      extraClass: (eliminated ? ' eliminated' : '') + (qualifiedThird ? ' qualified-third' : '')
+    });
+  }).join('');
+
+  const fixtureRows = matches.map((m, i) => renderResultsFixtureRow(m, i, group)).join('');
+
+  return `
+    <div class="group-card results-group-card${complete ? ' group-complete' : ''}">
+      <h3>Grupo ${group}</h3>
+      <div class="results-standings">${standingRows}</div>
+      <div class="results-fixtures">${fixtureRows}</div>
+    </div>
+  `;
+}
+
+function renderResultsThirdPlace() {
+  const thirds = RESULTS.thirdPlace || [];
+  if (!thirds.length) return '';
+  const items = thirds.map((team, i) => `
+    <div class="group-team result-qualified qualified-third">
+      <span class="position-badge">${i + 1}</span>
+      <span class="team-flag ${getTeamFlagClass(team)}"></span>
+      <span class="team-name">${escapeHtml(team)}</span>
+    </div>
+  `).join('');
+  return `
+    <h3 class="section-title">🥉 Mejores terceros clasificados</h3>
+    <div class="results-thirds">${items}</div>
+  `;
+}
+
+function renderResultsKnockout() {
+  const ko = RESULTS.knockout?.matches || {};
+  const rounds = KO_ROUND_ORDER.filter(round => (ko[round] || []).length);
+  if (!rounds.length) return '';
+
+  const sections = rounds.map(round => {
+    const rows = (ko[round] || [])
+      .slice()
+      .sort((a, b) => (a.match || 0) - (b.match || 0))
+      .map(m => {
+        const hasScore = typeof m.home === 'number' && typeof m.away === 'number';
+        const t1Win = m.winner && m.winner === m.team1;
+        const t2Win = m.winner && m.winner === m.team2;
+        return `
+          <div class="results-ko-row">
+            <span class="ko-team ko-left ${t1Win ? 'ko-winner' : ''}">
+              <span class="team-flag ${getTeamFlagClass(m.team1)}"></span>
+              <span class="rf-name">${escapeHtml(m.team1)}</span>
+            </span>
+            <span class="ko-score">${hasScore ? `${m.home}-${m.away}` : '✓'}</span>
+            <span class="ko-team ko-right ${t2Win ? 'ko-winner' : ''}">
+              <span class="rf-name">${escapeHtml(m.team2)}</span>
+              <span class="team-flag ${getTeamFlagClass(m.team2)}"></span>
+            </span>
+          </div>
+        `;
+      }).join('');
+    return `
+      <div class="results-ko-round">
+        <h4 class="results-ko-title">${KO_ROUND_LABELS[round]}</h4>
+        <div class="results-ko-list">${rows}</div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <h3 class="section-title">🥊 Eliminatorias jugadas</h3>
+    <div class="results-ko">${sections}</div>
+  `;
+}
+
+function renderResultsView() {
+  const container = document.getElementById('resultsContent');
+  if (!container) return;
+
+  if (!LOADED || !GROUP_NAMES.length) {
+    container.innerHTML = `<p class="note-text" style="margin-top:20px;">Cargando resultados...</p>`;
+    return;
+  }
+
+  const playedGroup = countPlayedGroupMatches();
+  const playedKo = countPlayedKnockoutMatches();
+  const totalPlayed = playedGroup + playedKo;
+
+  const updatedLabel = lastResultsFetch ? `Actualizado ${formatRelativeTime(lastResultsFetch)}` : '';
+  const header = `
+    <div class="results-status">
+      <span class="results-progress">⚽ ${totalPlayed} / 104 partidos jugados</span>
+      <span class="results-updated" id="resultsUpdated">${updatedLabel}</span>
+    </div>
+  `;
+
+  if (totalPlayed === 0) {
+    container.innerHTML = header + `
+      <p class="note-text" style="margin-top:24px; text-align:center;">
+        Todavía no hay resultados. En cuanto se juegue el primer partido aparecerá aquí solo. ⚽
+      </p>
+    `;
+    return;
+  }
+
+  const groupsGrid = `
+    <div class="results-groups-grid">
+      ${GROUP_NAMES.map(renderResultsGroupCard).join('')}
+    </div>
+  `;
+
+  container.innerHTML = header + groupsGrid + renderResultsThirdPlace() + renderResultsKnockout();
+}
+
+async function refreshLiveResults({ silent = true } = {}) {
+  try {
+    const resp = await fetch(DATA_SRC + '/worldcup.json', { cache: 'no-store' });
+    const data = await resp.json();
+    if (!data || !Array.isArray(data.matches)) throw new Error('Respuesta inesperada');
+    applyAutoResultsFromOpenFootball(data.matches);
+    lastResultsFetch = new Date();
+    renderResultsView();
+    if (!silent) showToast('Resultados actualizados.');
+  } catch (e) {
+    // Si falla, conservamos lo último cargado y no rompemos nada.
+    console.warn('No se pudieron refrescar los resultados en vivo:', e);
+    if (!silent) showToast('No se pudieron actualizar los resultados.', true);
+  }
+}
+
+function startResultsAutoRefresh() {
+  if (!resultsRefreshTimer) {
+    resultsRefreshTimer = setInterval(() => {
+      if (document.hidden) return;   // no gastamos peticiones en segundo plano
+      refreshLiveResults();
+    }, RESULTS_REFRESH_MS);
+  }
+
+  if (!resultsTickerTimer) {
+    // Mantiene vivo el "actualizado hace X" sin volver a pedir datos.
+    resultsTickerTimer = setInterval(() => {
+      const el = document.getElementById('resultsUpdated');
+      if (el && lastResultsFetch) el.textContent = `Actualizado ${formatRelativeTime(lastResultsFetch)}`;
+    }, 20000);
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refreshLiveResults();   // al volver a la pestaña, refresca ya
+  });
 }
 
 function resetState() {
@@ -3498,6 +3748,11 @@ async function init() {
   const ok = await loadData();
   hideLoading();
   if (!ok) { showToast('Failed to load tournament data. Check connection and reload.', true); return; }
+
+  // loadData ya aplicó los resultados reales de openfootball; marca la hora y
+  // arranca el refresco automático de la vista de resultados.
+  lastResultsFetch = new Date();
+  startResultsAutoRefresh();
 
   // Clear stale localStorage from old incompatible data
   const v = localStorage.getItem(LOCAL_STORAGE_VERSION_KEY);
