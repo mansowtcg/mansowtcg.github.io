@@ -2177,18 +2177,42 @@ function areAllRealGroupsComplete(results = RESULTS) {
   return GROUP_NAMES.length > 0 && GROUP_NAMES.every(group => isRealGroupComplete(group, results));
 }
 
+// Equipos que YA están confirmados clasificados a dieciseisavos, calculado grupo
+// a grupo (sin esperar a que TODA la fase de grupos acabe):
+//   - 1º y 2º de cada grupo cuyos partidos estén TODOS jugados (clasificación ya
+//     definitiva, no provisional).
+//   - Los 8 mejores terceros, que solo pueden conocerse cuando todos los grupos
+//     han terminado (results.thirdPlace se rellena en ese momento).
+function getRealQualifiedRound32Teams(results = RESULTS) {
+  const qualified = new Set();
+
+  GROUP_NAMES.forEach(group => {
+    if (!isRealGroupComplete(group, results)) return;
+    const order = results.groups?.[group] || [];
+    if (order[0]) qualified.add(order[0]);
+    if (order[1]) qualified.add(order[1]);
+  });
+
+  (results.thirdPlace || []).forEach(team => {
+    if (team) qualified.add(team);
+  });
+
+  return qualified;
+}
+
 function getKnockoutScoreBreakdown(prediction, results = RESULTS) {
   const predStages = getKnockoutStageTeamSets(prediction);
   const realStages = getKnockoutStageTeamSets(results);
-  const groupsDone = areAllRealGroupsComplete(results);
+
+  // Los clasificados reales a dieciseisavos se confirman grupo a grupo (1º/2º de
+  // cada grupo terminado) + los 8 mejores terceros al cerrar la fase, en vez de
+  // derivarlos del bracket (que usa clasificaciones provisionales mientras quedan
+  // grupos por jugar). Así cada acierto puntúa en cuanto su grupo ha terminado.
+  realStages.round32 = getRealQualifiedRound32Teams(results);
 
   let score = 0;
 
   ['round32', 'round16', 'quarterfinals', 'semifinals', 'finalist'].forEach(stage => {
-    // Clasificar a dieciseisavos (round32) es "pasar la fase de grupos": no puntúa
-    // hasta que toda la fase de grupos haya acabado. Las rondas siguientes ya están
-    // gateadas de forma natural porque solo se rellenan con partidos KO ya jugados.
-    if (stage === 'round32' && !groupsDone) return;
     const points = KNOCKOUT_SCORING[stage] || 0;
     predStages[stage].forEach(team => {
       if (realStages[stage].has(team)) score += points;
@@ -2226,17 +2250,15 @@ function getSemifinalistsFromPayload(payload) {
 function scorePrediction(prediction, results = RESULTS) {
   let score = 0;
 
-  // Los puntos por la posición final de grupo (1º/2º/3º) son "puntos de pasar la
-  // fase de grupos": solo se conceden cuando TODA la fase de grupos ha terminado,
-  // porque hasta entonces la clasificación es provisional. Los puntos por acertar
-  // marcadores sí cuentan partido a partido (más abajo).
-  const groupsDone = areAllRealGroupsComplete(results);
-
+  // Los puntos por la posición final de grupo (1º/2º/3º) solo se conceden cuando
+  // ESE grupo ha terminado todos sus partidos: hasta entonces su clasificación es
+  // provisional. Se evalúa grupo a grupo para que un grupo ya cerrado puntúe sin
+  // esperar al resto. Los puntos por acertar marcadores cuentan partido a partido.
   GROUP_NAMES.forEach(group => {
     const predGroup = prediction.groups?.[group] || [];
     const realGroup = results.groups?.[group] || [];
 
-    if (groupsDone) {
+    if (isRealGroupComplete(group, results)) {
       if (predictionResultStatus(predGroup[0], realGroup[0]) === 'correct') score += puntuaciones.grupos.posicion.primero;
       if (predictionResultStatus(predGroup[1], realGroup[1]) === 'correct') score += puntuaciones.grupos.posicion.segundo;
       if (predictionResultStatus(predGroup[2], realGroup[2]) === 'correct') score += puntuaciones.grupos.posicion.tercero;
@@ -2558,13 +2580,13 @@ function getGroupMatchReviewPoints(ph, pa, rh, ra) {
   return getResultOutcome(ph, pa) === getResultOutcome(rh, ra) ? puntuaciones.grupos.partido.ganadorEmpateCorrecto : 0;
 }
 
-function getPredictedGroupPositionPoints(team, idx, autoThirds, realOrder, realThirds) {
+function getPredictedGroupPositionPoints(team, idx, autoThirds, realOrder, realThirds, groupComplete) {
   // Group-stage position points are ONLY for exact positions.
   // No extra points for correctly predicting a best third: that is counted
   // later in the knockout bracket when the team appears in round of 32.
-  // Tampoco se conceden hasta que toda la fase de grupos haya terminado, igual
-  // que en el ranking (scorePrediction): la clasificación es provisional antes.
-  if (!areAllRealGroupsComplete()) return 0;
+  // Solo se conceden cuando ESE grupo ha terminado (clasificación definitiva),
+  // igual que en el ranking (scorePrediction): antes es provisional.
+  if (!groupComplete) return 0;
   if (predictionResultStatus(team, realOrder[idx]) !== 'correct') return 0;
 
   if (idx === 0) return puntuaciones.grupos.posicion.primero;
@@ -2594,9 +2616,10 @@ function calculateGroupReviewTotalPoints(group, prediction) {
   const realOrder = RESULTS.groups?.[group] || [];
   const realThirds = new Set(RESULTS.thirdPlace || []);
   const autoThirds = new Set(prediction.thirdPlace || []);
+  const groupComplete = isRealGroupComplete(group);
 
   const positionPoints = standings.reduce((total, row, idx) => {
-    return total + getPredictedGroupPositionPoints(row.team, idx, autoThirds, realOrder, realThirds);
+    return total + getPredictedGroupPositionPoints(row.team, idx, autoThirds, realOrder, realThirds, groupComplete);
   }, 0);
 
   return matchPoints + positionPoints;
@@ -2819,6 +2842,7 @@ function openReadOnlyGroupResultsModal(entry, group) {
   const realOrder = RESULTS.groups?.[group] || [];
   const realThirds = new Set(RESULTS.thirdPlace || []);
   const predOrder = standings.map(row => row.team);
+  const groupComplete = isRealGroupComplete(group);
 
   predictedStandingsDiv.innerHTML = standings.map((row, idx) => {
     const isThird = idx === 2;
@@ -2840,7 +2864,7 @@ function openReadOnlyGroupResultsModal(entry, group) {
   }).join('');
 
   positionPointsDiv.innerHTML = standings.map((row, idx) => {
-    const points = getPredictedGroupPositionPoints(row.team, idx, autoThirds, realOrder, realThirds);
+    const points = getPredictedGroupPositionPoints(row.team, idx, autoThirds, realOrder, realThirds, groupComplete);
     return `<div class="review-standing-points-row">${renderReviewPointsBadge(points, 'Puntos por esta posición')}</div>`;
   }).join('');
 
@@ -3316,6 +3340,9 @@ function renderReviewKnockout(prediction) {
   }
 
   const realStageTeams = getKnockoutStageTeamSets(RESULTS);
+  // Mismo criterio que la puntuación: clasificados a dieciseisavos confirmados
+  // grupo a grupo, no derivados del bracket provisional.
+  realStageTeams.round32 = getRealQualifiedRound32Teams(RESULTS);
 
   function getBracketSlotPoints(team, roundName) {
     return getKnockoutProgressPointsForTeam(team, roundName, realStageTeams, predictedState);
